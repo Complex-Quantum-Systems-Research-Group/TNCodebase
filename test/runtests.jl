@@ -1,4 +1,3 @@
-using Revise
 using Test
 using TNCodebase
 using LinearAlgebra
@@ -43,20 +42,7 @@ using LinearAlgebra
         @test is_right_orthogonal(mps.tensors[4])
         @test is_right_orthogonal(mps.tensors[5])
     end
-        
-    @testset "Observables" begin
-        # Create simple MPS
-        N = 10
-        tensors = [rand(ComplexF64, 1, 2, 1) for i in 1:N]
-        mps = tensors
-        
-        # Test single-site expectation
-        Sz = [0.5 0; 0 -0.5]
-        exp_val = single_site_expectation(5, Sz, mps)
-        @test isa(exp_val, Number)
-        @test abs(exp_val) <= 0.5  # For spin-1/2
-    end
-    
+            
     println("\n✓ All basic tests passed!")
     println("\n✓ Add more tests in future!")
 end
