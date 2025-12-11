@@ -15,10 +15,6 @@ Pkg.activate(joinpath(@__DIR__, "..", "..", ".."))
 using TNCodebase
 using JSON
 
-println("="^70)
-println("Long-Range Ising (Custom): TDVP Time Evolution")
-println("="^70)
-
 # ============================================================================
 # LOAD CONFIGURATION
 # ============================================================================
