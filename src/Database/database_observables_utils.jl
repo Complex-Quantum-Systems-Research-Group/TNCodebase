@@ -5,18 +5,40 @@
 # This module provides database functionality for managing observable
 # calculations on tensor network simulation data.
 #
-# STRUCTURE:
+# CONFIG STRUCTURE (Analysis):
+# {
+#   "simulation": {
+#     "system": { ... },
+#     "model": { ... },
+#     "state": { ... },
+#     "algorithm": { ... }
+#   },
+#   "analysis": {
+#     "sweeps": { "selection": "all", ... },
+#     "observable": { "type": "...", "params": { ... } }
+#   },
+#   "description": "..."   ← Ignored for hashing
+# }
+#
+# HASH STRATEGY:
+# - Level 1: config["simulation"] → sim_hash → finds simulation data
+#   (uses _compute_config_hash from database_utils.jl which normalizes to
+#    system/model/state/algorithm only)
+# - Level 2: config (normalized to simulation+analysis) → obs_hash → 
+#   identifies this observable calculation
+#
+# DIRECTORY STRUCTURE:
 #   observables/
 #   ├── observables_index.json
 #   └── {algorithm}/
-#       └── {simulation_run_id}/
-#           └── {observable_run_id}/
+#       └── {sim_run_id}/              ← from simulation hash
+#           └── {obs_run_id}/          ← from full config hash
 #               ├── observable_config.json
 #               ├── metadata.json
 #               └── observable_sweep_*.jld2
 #
 # TYPICAL WORKFLOW:
-#   1. Setup: obs_run_id, obs_run_dir = _setup_observable_directory(obs_config, sim_run_id, algorithm)
+#   1. Setup: obs_run_id, obs_run_dir = _setup_observable_directory(config, sim_run_id, algorithm)
 #   2. Calculate & Save: _save_observable_sweep(obs_value, obs_run_dir, sweep; extra_data=...)
 #   3. Finalize: _finalize_observable_run(obs_run_dir, status="completed")
 #   4. Later: obs_value = load_observable_sweep(obs_run_dir, sweep)
@@ -33,20 +55,49 @@ using Printf
 # PART 1: HASH AND ID GENERATION
 # ============================================================================
 
+const ANALYSIS_KEYS = ["simulation", "analysis"]
+
 """
-    _compute_observable_config_hash(obs_config::Dict) -> String
+    _normalize_analysis_config_for_hash(config::Dict) -> Dict
+
+Extract only analysis-relevant sections from config.
+Ignores "description" and any other non-essential sections.
+
+This ensures that changing the description doesn't change the hash,
+mirroring the behavior of _normalize_config_for_hash in database_utils.jl.
+"""
+function _normalize_analysis_config_for_hash(config::Dict)
+    normalized = Dict{String, Any}()
+    for key in ANALYSIS_KEYS
+        if haskey(config, key)
+            normalized[key] = config[key]
+        end
+    end
+    return normalized
+end
+
+"""
+    _compute_observable_config_hash(config::Dict) -> String
 
 Compute an 8-character hash that uniquely identifies an observable configuration.
 
-The hash is deterministic: same observable config always produces the same hash.
+The hash is deterministic: same config always produces the same hash.
 This enables finding duplicate calculations.
+
+NOTE: Hashes only "simulation" and "analysis" sections (excludes "description").
+- Same simulation + same observable = same hash (detect duplicates)
+- Same simulation + different observable = different hash (separate calculations)
 
 # Returns
 - String: 8 hex characters (e.g., "f4b2c3d1")
 """
-function _compute_observable_config_hash(obs_config::Dict)
+function _compute_observable_config_hash(config::Dict)
+    # Normalize: extract only analysis-relevant sections (simulation + analysis)
+    # Excludes "description" and other metadata
+    normalized = _normalize_analysis_config_for_hash(config)
+    
     # Convert to canonical JSON
-    config_str = JSON.json(obs_config, 2)
+    config_str = JSON.json(normalized, 2)
     
     # Compute SHA256 and take first 8 characters
     hash_full = bytes2hex(sha256(config_str))
@@ -55,7 +106,7 @@ function _compute_observable_config_hash(obs_config::Dict)
 end
 
 """
-    _generate_observable_run_id(obs_config::Dict) -> String
+    _generate_observable_run_id(config::Dict) -> String
 
 Generate a unique identifier for an observable calculation run.
 
@@ -65,12 +116,12 @@ Format: YYYYMMDD_HHMMSS_HHHHHHHH
 # Returns
 - String: Unique observable run ID (e.g., "20241104_153045_f4b2c3d1")
 """
-function _generate_observable_run_id(obs_config::Dict)
+function _generate_observable_run_id(config::Dict)
     # Get current timestamp
     timestamp = Dates.format(now(), "yyyymmdd_HHMMSS")
     
-    # Get observable config hash
-    obs_hash = _compute_observable_config_hash(obs_config)
+    # Get full config hash (normalized)
+    obs_hash = _compute_observable_config_hash(config)
     
     # Combine: timestamp_hash
     return "$(timestamp)_$(obs_hash)"
@@ -81,7 +132,7 @@ end
 # ============================================================================
 
 """
-    _setup_observable_directory(obs_config, sim_run_id, algorithm; obs_base_dir="observables") 
+    _setup_observable_directory(config, sim_run_id, algorithm; obs_base_dir="observables") 
         -> (String, String)
 
 Initialize directory structure and files for a new observable calculation.
@@ -100,7 +151,7 @@ observables/
 ```
 
 # Arguments
-- `obs_config::Dict`: Observable configuration
+- `config::Dict`: Full analysis config (with "simulation" and "analysis" sections)
 - `sim_run_id::String`: Simulation run identifier (links to data/)
 - `algorithm::String`: Algorithm type ("dmrg" or "tdvp")
 - `obs_base_dir::String`: Root observable directory (default: "observables")
@@ -112,18 +163,18 @@ observables/
 # Example
 ```julia
 obs_run_id, obs_run_dir = _setup_observable_directory(
-    obs_config, 
+    config, 
     "20241103_142530_a3f5b2c1", 
     "tdvp"
 )
 ```
 """
-function _setup_observable_directory(obs_config::Dict, 
+function _setup_observable_directory(config::Dict, 
                                     sim_run_id::String, 
                                     algorithm::String; 
                                     obs_base_dir::String="observables")
-    # Generate unique observable run ID
-    obs_run_id = _generate_observable_run_id(obs_config)
+    # Generate unique observable run ID (uses normalized config hash)
+    obs_run_id = _generate_observable_run_id(config)
     
     # Create full path: observables/algorithm/sim_run_id/obs_run_id
     obs_run_dir = joinpath(obs_base_dir, algorithm, sim_run_id, obs_run_id)
@@ -132,21 +183,22 @@ function _setup_observable_directory(obs_config::Dict,
     mkpath(obs_run_dir)
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # Save observable_config.json
+    # Save observable_config.json (full config for reproducibility)
     # ═══════════════════════════════════════════════════════════════════════════
     obs_config_path = joinpath(obs_run_dir, "observable_config.json")
     open(obs_config_path, "w") do f
-        JSON.print(f, obs_config, 2)
+        JSON.print(f, config, 2)
     end
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Initialize metadata.json
     # ═══════════════════════════════════════════════════════════════════════════
+    # Observable info is under config["analysis"]["observable"]
     metadata = Dict(
         "obs_run_id" => obs_run_id,
         "sim_run_id" => sim_run_id,
         "algorithm" => algorithm,
-        "observable_type" => obs_config["observable"]["type"],
+        "observable_type" => config["analysis"]["observable"]["type"],
         "start_time" => string(now()),
         "status" => "running",
         "sweeps_processed" => 0,
@@ -162,7 +214,7 @@ function _setup_observable_directory(obs_config::Dict,
     # ═══════════════════════════════════════════════════════════════════════════
     # Update master observable index
     # ═══════════════════════════════════════════════════════════════════════════
-    _update_observable_index(obs_config, sim_run_id, obs_run_id, obs_run_dir, obs_base_dir)
+    _update_observable_index(config, sim_run_id, obs_run_id, obs_run_dir, obs_base_dir)
     
     println("✓ Setup observable directory: $obs_run_dir")
     
@@ -170,7 +222,7 @@ function _setup_observable_directory(obs_config::Dict,
 end
 
 """
-    _update_observable_index(obs_config, sim_run_id, obs_run_id, obs_run_dir, obs_base_dir)
+    _update_observable_index(config, sim_run_id, obs_run_id, obs_run_dir, obs_base_dir)
 
 Update the master observable index with a new calculation entry.
 
@@ -178,7 +230,7 @@ The index maps: sim_run_id → [list of observable calculations]
 
 This enables quick lookup of all observables calculated for a simulation.
 """
-function _update_observable_index(obs_config::Dict, 
+function _update_observable_index(config::Dict, 
                                 sim_run_id::String,
                                 obs_run_id::String, 
                                 obs_run_dir::String,
@@ -195,14 +247,14 @@ function _update_observable_index(obs_config::Dict,
         )
     end
     
-    # Prepare entry
+    # Observable info is under config["analysis"]["observable"]
     entry = Dict(
         "obs_run_id" => obs_run_id,
         "obs_run_dir" => obs_run_dir,
-        "observable_type" => obs_config["observable"]["type"],
-        "observable_params" => obs_config["observable"]["params"],
+        "observable_type" => config["analysis"]["observable"]["type"],
+        "observable_params" => config["analysis"]["observable"]["params"],
         "timestamp" => string(now()),
-        "obs_config_hash" => _compute_observable_config_hash(obs_config)
+        "obs_config_hash" => _compute_observable_config_hash(config)
     )
     
     # Add to index under sim_run_id
@@ -251,21 +303,20 @@ for sweep in sweeps_to_process
 end
 ```
 """
-function _save_observable_sweep(obs_value, 
-                              obs_run_dir::String, 
-                              sweep::Int; 
-                              extra_data::Dict=Dict())
+function _save_observable_sweep(obs_value, obs_run_dir::String, sweep::Int; 
+                               extra_data::Dict=Dict())
     # ════════════════════════════════════════════════════════════════════════
-    # 1. Save observable value to binary file
+    # 1. Save observable to binary file
     # ════════════════════════════════════════════════════════════════════════
     
     filename = @sprintf("observable_sweep_%d.jld2", sweep)
     filepath = joinpath(obs_run_dir, filename)
     
+    # Save observable value and extra_data
     jldsave(filepath;
             observable_value=obs_value,
-            sweep=sweep,
-            extra_data=extra_data)  # Original simulation metadata
+            extra_data=extra_data,
+            sweep=sweep)
     
     # ════════════════════════════════════════════════════════════════════════
     # 2. Update metadata.json
@@ -275,17 +326,13 @@ function _save_observable_sweep(obs_value,
     metadata = JSON.parsefile(metadata_path)
     
     # Update progress
-    metadata["sweeps_processed"] = metadata["sweeps_processed"] + 1
+    metadata["sweeps_processed"] = sweep
     metadata["last_update"] = string(now())
     
-    # Add sweep entry
-    sweep_info = Dict(
-        "sweep" => sweep,
-        "filename" => filename,
-        "observable_value" => obs_value  # Store for quick access
-    )
+    # Add sweep info
+    sweep_info = Dict("sweep" => sweep, "filename" => filename)
     
-    # Merge with extra_data if available
+    # Include extra_data in sweep info if provided
     if !isempty(extra_data)
         sweep_info = merge(sweep_info, extra_data)
     end
@@ -423,16 +470,16 @@ function find_observables_for_simulation(sim_run_id::String;
 end
 
 """
-    observable_already_calculated(obs_config, sim_run_id; obs_base_dir="observables") -> Bool
+    observable_already_calculated(config, sim_run_id; obs_base_dir="observables") -> Bool
 
 Check if an observable with this exact config has already been calculated.
 
-Uses config hash to detect duplicates.
+Uses normalized config hash to detect duplicates.
 """
-function observable_already_calculated(obs_config::Dict, 
+function observable_already_calculated(config::Dict, 
                                       sim_run_id::String; 
                                       obs_base_dir::String="observables")
-    obs_hash = _compute_observable_config_hash(obs_config)
+    obs_hash = _compute_observable_config_hash(config)
     observables = find_observables_for_simulation(sim_run_id, obs_base_dir=obs_base_dir)
     
     for obs in observables
@@ -449,7 +496,7 @@ end
 # ============================================================================
 
 """
-    find_observable_runs_by_config(obs_config::Dict; base_dir="data", obs_base_dir="observables")
+    find_observable_runs_by_config(config::Dict; base_dir="data", obs_base_dir="observables")
         -> Vector{Dict}
 
 Find all observable calculation runs matching this exact config.
@@ -461,8 +508,8 @@ Mirrors `find_runs_by_config()` from simulation database.
 
 # Example
 ```julia
-obs_config = JSON.parsefile("configs/obs_magnetization.json")
-runs = find_observable_runs_by_config(obs_config)
+config = JSON.parsefile("configs/analysis_magnetization.json")
+runs = find_observable_runs_by_config(config)
 
 for run in runs
     println("Run: ", run["obs_run_id"])
@@ -470,17 +517,12 @@ for run in runs
 end
 ```
 """
-function find_observable_runs_by_config(obs_config::Dict; 
+function find_observable_runs_by_config(config::Dict; 
                                         base_dir::String="data",
                                         obs_base_dir::String="observables")
-    # Get simulation config and find simulation run
-    sim_config_file = obs_config["simulation"]["config_file"]
+    # Simulation config is embedded under "simulation" key
+    sim_config = config["simulation"]
     
-    if !isfile(sim_config_file)
-        error("Simulation config file not found: $sim_config_file")
-    end
-    
-    sim_config = JSON.parsefile(sim_config_file)
     sim_runs = _find_runs_by_config(sim_config, base_dir)
     
     if isempty(sim_runs)
@@ -493,15 +535,15 @@ function find_observable_runs_by_config(obs_config::Dict;
     # Find all observables for this simulation
     all_obs = find_observables_for_simulation(sim_run_id, obs_base_dir=obs_base_dir)
     
-    # Filter by matching config hash
-    obs_hash = _compute_observable_config_hash(obs_config)
+    # Filter by matching normalized config hash
+    obs_hash = _compute_observable_config_hash(config)
     matching_runs = filter(obs -> obs["obs_config_hash"] == obs_hash, all_obs)
     
     return matching_runs
 end
 
 """
-    get_latest_observable_run_for_config(obs_config::Dict; base_dir="data", obs_base_dir="observables")
+    get_latest_observable_run_for_config(config::Dict; base_dir="data", obs_base_dir="observables")
         -> Dict or nothing
 
 Get the most recent observable calculation matching this config.
@@ -513,8 +555,8 @@ Mirrors `get_latest_run_for_config()` from simulation database.
 
 # Example
 ```julia
-obs_config = JSON.parsefile("configs/obs_magnetization.json")
-run_info = get_latest_observable_run_for_config(obs_config)
+config = JSON.parsefile("configs/analysis_magnetization.json")
+run_info = get_latest_observable_run_for_config(config)
 
 if run_info !== nothing
     obs_run_dir = run_info["obs_run_dir"]
@@ -524,10 +566,10 @@ else
 end
 ```
 """
-function get_latest_observable_run_for_config(obs_config::Dict;
+function get_latest_observable_run_for_config(config::Dict;
                                              base_dir::String="data",
                                              obs_base_dir::String="observables")
-    runs = find_observable_runs_by_config(obs_config, base_dir=base_dir, obs_base_dir=obs_base_dir)
+    runs = find_observable_runs_by_config(config, base_dir=base_dir, obs_base_dir=obs_base_dir)
     
     if isempty(runs)
         return nothing
