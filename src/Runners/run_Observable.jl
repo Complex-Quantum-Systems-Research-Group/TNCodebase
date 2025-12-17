@@ -6,10 +6,25 @@
 # MPS data from tensor network simulations.
 #
 # RESPONSIBILITIES:
-# - Load simulation config and find simulation data
+# - Extract simulation config and find simulation data via hash
 # - Load MPS for specified sweeps
 # - Calculate requested observables
 # - Save results using database functions
+#
+# CONFIG STRUCTURE (Analysis):
+# {
+#   "simulation": {
+#     "system": { ... },
+#     "model": { ... },
+#     "state": { ... },
+#     "algorithm": { ... }
+#   },
+#   "analysis": {
+#     "sweeps": { "selection": "all", ... },
+#     "observable": { "type": "...", "params": { ... } }
+#   },
+#   "description": "..."
+# }
 #
 # DATABASE/SAVING:
 # - Uses Database_observable_utils.jl functions for saving
@@ -221,21 +236,38 @@ end
 # ============================================================================
 
 """
-    run_observable_calculation_from_config(obs_config; base_dir="data", obs_base_dir="observables")
+    run_observable_calculation_from_config(config; base_dir="data", obs_base_dir="observables")
         -> (String, String)
 
 Main entry point for observable calculations with automatic saving.
 
 # Arguments
-- `obs_config::Dict`: Observable configuration
+- `config::Dict`: Analysis configuration with "simulation" and "analysis" sections
 - `base_dir::String`: Base directory for simulation data (default: "data")
 - `obs_base_dir::String`: Base directory for observable data (default: "observables")
 
 # Returns
 - `(obs_run_id, obs_run_dir)`: Observable run identifier and directory
 
+# Config Structure
+```json
+{
+  "simulation": {
+    "system": { ... },
+    "model": { ... },
+    "state": { ... },
+    "algorithm": { ... }
+  },
+  "analysis": {
+    "sweeps": { "selection": "all" },
+    "observable": { "type": "...", "params": { ... } }
+  },
+  "description": "..."
+}
+```
+
 # Workflow
-1. Load simulation config from referenced file
+1. Extract simulation config from "simulation" section
 2. Find simulation run using config hash
 3. Setup observable directory structure
 4. For each sweep:
@@ -246,14 +278,14 @@ Main entry point for observable calculations with automatic saving.
 
 # Example
 ```julia
-obs_config = JSON.parsefile("configs/obs_magnetization.json")
-obs_run_id, obs_run_dir = run_observable_calculation_from_config(obs_config)
+config = JSON.parsefile("configs/analysis_magnetization.json")
+obs_run_id, obs_run_dir = run_observable_calculation_from_config(config)
 
 # Load results later
 results = load_all_observable_results(obs_run_dir)
 ```
 """
-function run_observable_calculation_from_config(obs_config::Dict; 
+function run_observable_calculation_from_config(config::Dict; 
                                                 base_dir::String="data",
                                                 obs_base_dir::String="observables")
     println("="^70)
@@ -261,21 +293,16 @@ function run_observable_calculation_from_config(obs_config::Dict;
     println("="^70)
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 1: Load Simulation Config and Find Run
+    # STEP 1: Extract Simulation Config (embedded in "simulation" key)
     # ════════════════════════════════════════════════════════════════════════
     
-    println("\n[1/5] Loading simulation config and finding run...")
+    println("\n[1/5] Extracting simulation config and finding run...")
     
-    sim_config_file = obs_config["simulation"]["config_file"]
+    # Simulation config is embedded directly under "simulation" key
+    sim_config = config["simulation"]
+    println("  ✓ Extracted embedded simulation config")
     
-    if !isfile(sim_config_file)
-        error("Simulation config file not found: $sim_config_file")
-    end
-    
-    sim_config = JSON.parsefile(sim_config_file)
-    println("  ✓ Loaded simulation config: $sim_config_file")
-    
-    # Find runs with this config
+    # Find runs with this config using simulation hash
     runs = _find_runs_by_config(sim_config, base_dir)
     
     if isempty(runs)
@@ -298,37 +325,39 @@ function run_observable_calculation_from_config(obs_config::Dict;
     algorithm = sim_config["algorithm"]["type"]
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 2: Setup Observable Directory (NEW!)
+    # STEP 2: Setup Observable Directory
     # ════════════════════════════════════════════════════════════════════════
     
     println("\n[2/5] Setting up observable directory...")
     
-    # NEW: Setup observable directory structure
-    obs_run_id, obs_run_dir = _setup_observable_directory(obs_config, sim_run_id, algorithm, 
+    # Pass full config for hashing (simulation + analysis)
+    obs_run_id, obs_run_dir = _setup_observable_directory(config, sim_run_id, algorithm, 
                                                          obs_base_dir=obs_base_dir)
     
     println("  ✓ Observable run ID: $obs_run_id")
     println("  ✓ Observable directory: $obs_run_dir")
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 3: Determine Sweeps to Process
+    # STEP 3: Determine Sweeps to Process (from "analysis" section)
     # ════════════════════════════════════════════════════════════════════════
     
     println("\n[3/5] Determining sweeps to process...")
     
-    sweeps_to_process = _get_sweeps_to_process(obs_config["sweeps"], sim_run_dir)
+    # Sweeps config is under "analysis" section
+    sweeps_to_process = _get_sweeps_to_process(config["analysis"]["sweeps"], sim_run_dir)
     
     println("  ✓ Sweeps to process: $(length(sweeps_to_process))")
     println("    Range: $(minimum(sweeps_to_process)) to $(maximum(sweeps_to_process))")
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 4: Load Hamiltonian if Needed
+    # STEP 4: Load Hamiltonian if Needed (from "analysis" section)
     # ════════════════════════════════════════════════════════════════════════
     
     println("\n[4/5] Preparing observable calculation...")
     
-    obs_type = obs_config["observable"]["type"]
-    obs_params = obs_config["observable"]["params"]
+    # Observable config is under "analysis" section
+    obs_type = config["analysis"]["observable"]["type"]
+    obs_params = config["analysis"]["observable"]["params"]
     
     println("  Observable type: $obs_type")
     
@@ -344,7 +373,7 @@ function run_observable_calculation_from_config(obs_config::Dict;
     end
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 5: Calculate and Save Observables for Each Sweep (MODIFIED!)
+    # STEP 5: Calculate and Save Observables for Each Sweep
     # ════════════════════════════════════════════════════════════════════════
     
     println("\n[5/5] Calculating and saving observables...")
@@ -358,7 +387,7 @@ function run_observable_calculation_from_config(obs_config::Dict;
             # Calculate observable
             obs_value = _calculate_observable(obs_type, obs_params, mps.tensors, ham)
             
-            # NEW: Save immediately after calculation
+            # Save immediately after calculation
             _save_observable_sweep(obs_value, obs_run_dir, sweep; extra_data=extra_data)
             
             # Print progress
@@ -368,7 +397,7 @@ function run_observable_calculation_from_config(obs_config::Dict;
         end
         
         # ════════════════════════════════════════════════════════════════════
-        # NEW: Finalize Observable Run
+        # Finalize Observable Run
         # ════════════════════════════════════════════════════════════════════
         
         println("="^70)
@@ -383,7 +412,7 @@ function run_observable_calculation_from_config(obs_config::Dict;
     end
     
     # ════════════════════════════════════════════════════════════════════════
-    # Return Observable Run Info (CHANGED!)
+    # Return Observable Run Info
     # ════════════════════════════════════════════════════════════════════════
     
     println("\n" * "="^70)
@@ -396,7 +425,6 @@ function run_observable_calculation_from_config(obs_config::Dict;
     println("  Results saved in: $obs_run_dir")
     println("="^70)
     
-    # NEW: Return only IDs, not results (data is saved)
     return obs_run_id, obs_run_dir
 end
 
@@ -405,7 +433,7 @@ end
 # ============================================================================
 
 """
-    _calculate_observable_at_sweep(obs_type, params, sim_run_dir, sweep; base_dir="data")
+    _calculate_observable_at_sweep(obs_type, params, sim_run_dir, sweep)
 
 Calculate observable for a single sweep (utility function).
 
