@@ -1,4 +1,4 @@
-# TNCodebase: Tensor Network Framework for Quantum Many-Body Dynamics
+# TNCodebase: Tensor Network based numerical Framework for Quantum Many-Body Dynamics
 
 A comprehensive and user-friendly, Julia package for simulating quantum many-body systems using tensor network methods where the user interacts with the engine through a single JSON config file. Implements state-of-the-art algorithms including DMRG (Density Matrix Renormalization Group) and TDVP (Time-Dependent Variational Principle) with an emphasis on extensibility, performance, and reproducibility.
 
