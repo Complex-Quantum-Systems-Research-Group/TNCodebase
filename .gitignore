@@ -1,6 +1,9 @@
 # Simulation data (auto-generated)
 data/
 
+#Local test files
+local_tests
+
 # Julia package artifacts
 Manifest.toml
 *.jl.cov
