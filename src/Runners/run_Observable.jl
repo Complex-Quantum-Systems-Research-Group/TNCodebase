@@ -10,6 +10,7 @@
 # - Load MPS for specified sweeps
 # - Calculate requested observables
 # - Save results using database functions
+# - Detect and skip duplicate calculations (unless force_recalculate=true)
 #
 # CONFIG STRUCTURE (Analysis):
 # {
@@ -236,7 +237,7 @@ end
 # ============================================================================
 
 """
-    run_observable_calculation_from_config(config; base_dir="data", obs_base_dir="observables")
+    run_observable_calculation_from_config(config; base_dir="data", obs_base_dir="observables", force_recalculate=false)
         -> (String, String)
 
 Main entry point for observable calculations with automatic saving.
@@ -245,6 +246,7 @@ Main entry point for observable calculations with automatic saving.
 - `config::Dict`: Analysis configuration with "simulation" and "analysis" sections
 - `base_dir::String`: Base directory for simulation data (default: "data")
 - `obs_base_dir::String`: Base directory for observable data (default: "observables")
+- `force_recalculate::Bool`: If true, recalculate even if already exists (default: false)
 
 # Returns
 - `(obs_run_id, obs_run_dir)`: Observable run identifier and directory
@@ -269,12 +271,13 @@ Main entry point for observable calculations with automatic saving.
 # Workflow
 1. Extract simulation config from "simulation" section
 2. Find simulation run using config hash
-3. Setup observable directory structure
-4. For each sweep:
+3. Check for existing completed calculation (skip if found, unless force_recalculate=true)
+4. Setup observable directory structure
+5. For each sweep:
    - Load MPS
    - Calculate observable
    - Save immediately
-5. Finalize metadata
+6. Finalize metadata
 
 # Example
 ```julia
@@ -283,11 +286,15 @@ obs_run_id, obs_run_dir = run_observable_calculation_from_config(config)
 
 # Load results later
 results = load_all_observable_results(obs_run_dir)
+
+# Force recalculation
+obs_run_id, obs_run_dir = run_observable_calculation_from_config(config, force_recalculate=true)
 ```
 """
 function run_observable_calculation_from_config(config::Dict; 
                                                 base_dir::String="data",
-                                                obs_base_dir::String="observables")
+                                                obs_base_dir::String="observables",
+                                                force_recalculate::Bool=false)
     println("="^70)
     println("Starting Observable Calculation from Config")
     println("="^70)
@@ -296,7 +303,7 @@ function run_observable_calculation_from_config(config::Dict;
     # STEP 1: Extract Simulation Config (embedded in "simulation" key)
     # ════════════════════════════════════════════════════════════════════════
     
-    println("\n[1/5] Extracting simulation config and finding run...")
+    println("\n[1/6] Extracting simulation config and finding run...")
     
     # Simulation config is embedded directly under "simulation" key
     sim_config = config["simulation"]
@@ -325,10 +332,41 @@ function run_observable_calculation_from_config(config::Dict;
     algorithm = sim_config["algorithm"]["type"]
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 2: Setup Observable Directory
+    # STEP 2: Deduplication Check (before setting up new directory!)
     # ════════════════════════════════════════════════════════════════════════
     
-    println("\n[2/5] Setting up observable directory...")
+    println("\n[2/6] Checking for existing calculations...")
+    
+    if !force_recalculate
+        existing = _get_completed_observable_run(config, sim_run_id, obs_base_dir=obs_base_dir)
+        
+        if existing !== nothing
+            println("="^70)
+            println("✓ OBSERVABLE ALREADY CALCULATED")
+            println("="^70)
+            println("  Observable type: $(existing["observable_type"])")
+            println("  Run ID: $(existing["obs_run_id"])")
+            println("  Path:   $(existing["obs_run_dir"])")
+            println("")
+            println("  To force recalculation, use: force_recalculate=true")
+            println("")
+            println("  Load existing results with:")
+            println("    load_all_observable_results(\"$(existing["obs_run_dir"])\")")
+            println("="^70)
+            
+            return existing["obs_run_id"], existing["obs_run_dir"]
+        end
+        
+        println("  No completed calculation found. Proceeding...")
+    else
+        println("  force_recalculate=true. Skipping deduplication check...")
+    end
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 3: Setup Observable Directory
+    # ════════════════════════════════════════════════════════════════════════
+    
+    println("\n[3/6] Setting up observable directory...")
     
     # Pass full config for hashing (simulation + analysis)
     obs_run_id, obs_run_dir = _setup_observable_directory(config, sim_run_id, algorithm, 
@@ -338,10 +376,10 @@ function run_observable_calculation_from_config(config::Dict;
     println("  ✓ Observable directory: $obs_run_dir")
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 3: Determine Sweeps to Process (from "analysis" section)
+    # STEP 4: Determine Sweeps to Process (from "analysis" section)
     # ════════════════════════════════════════════════════════════════════════
     
-    println("\n[3/5] Determining sweeps to process...")
+    println("\n[4/6] Determining sweeps to process...")
     
     # Sweeps config is under "analysis" section
     sweeps_to_process = _get_sweeps_to_process(config["analysis"]["sweeps"], sim_run_dir)
@@ -350,10 +388,10 @@ function run_observable_calculation_from_config(config::Dict;
     println("    Range: $(minimum(sweeps_to_process)) to $(maximum(sweeps_to_process))")
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 4: Load Hamiltonian if Needed (from "analysis" section)
+    # STEP 5: Load Hamiltonian if Needed (from "analysis" section)
     # ════════════════════════════════════════════════════════════════════════
     
-    println("\n[4/5] Preparing observable calculation...")
+    println("\n[5/6] Preparing observable calculation...")
     
     # Observable config is under "analysis" section
     obs_type = config["analysis"]["observable"]["type"]
@@ -373,10 +411,10 @@ function run_observable_calculation_from_config(config::Dict;
     end
     
     # ════════════════════════════════════════════════════════════════════════
-    # STEP 5: Calculate and Save Observables for Each Sweep
+    # STEP 6: Calculate and Save Observables for Each Sweep
     # ════════════════════════════════════════════════════════════════════════
     
-    println("\n[5/5] Calculating and saving observables...")
+    println("\n[6/6] Calculating and saving observables...")
     println("="^70)
     
     try
@@ -401,7 +439,7 @@ function run_observable_calculation_from_config(config::Dict;
         # ════════════════════════════════════════════════════════════════════
         
         println("="^70)
-        println("\n[6/6] Finalizing...")
+        println("\nFinalizing...")
         _finalize_observable_run(obs_run_dir, status="completed")
         
     catch e
