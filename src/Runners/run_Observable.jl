@@ -136,7 +136,36 @@ function _get_sweeps_to_process(sweep_config::Dict, run_dir::String)
         end
         
         t_start, t_end = sweep_config["time_range"]
+
+        # Get available time range from sweep_data
+        available_times = Float64[]
+        for entry in metadata["sweep_data"]
+            if haskey(entry, "time")
+                push!(available_times, entry["time"])
+            end
+        end
         
+        if isempty(available_times)
+            error("No time information found in sweep_data")
+        end
+        
+        t_min_available = minimum(available_times)
+        t_max_available = maximum(available_times)
+        
+        # Validate requested range
+        if t_start > t_max_available
+            error("Requested time range [$t_start, $t_end] starts after available data ends at t=$t_max_available")
+        end
+        
+        if t_end > t_max_available
+            @warn "Requested end time $t_end exceeds available data (max t=$t_max_available). Using t=$t_max_available instead."
+            t_end = t_max_available
+        end
+        
+        if t_end < t_min_available
+            error("Requested time range [$t_start, $t_end] ends before available data starts at t=$t_min_available")
+        end
+            
         # Filter sweeps by time
         selected_sweeps = Int[]
         for entry in metadata["sweep_data"]
