@@ -1,5 +1,6 @@
 # Simulation data (auto-generated)
 data/
+data_obs/
 
 #Local test files
 #local_tests
