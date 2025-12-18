@@ -959,9 +959,12 @@
                     </div>
                 </div>
 
-                <!-- Run subsection (simulation mode only) -->
+                <!-- Run subsection -->
                 <div class="subsection" id="run-subsection">
                     <h3>Run</h3>
+                    <div class="info-box" id="run-info-analysis" style="display: none;">
+                        <strong>Note:</strong> This value must match the original simulation's n_sweeps for the hash to match.
+                    </div>
                     <div class="form-group">
                         <label>n_sweeps</label>
                         <input type="number" id="run-n_sweeps" value="50" min="1" onchange="updatePreview()">
@@ -1269,8 +1272,9 @@
             // Show/hide analysis section
             document.getElementById('analysis-section').classList.toggle('hidden', mode === 'simulation');
             
-            // Show/hide run subsection (only for simulation)
-            document.getElementById('run-subsection').classList.toggle('hidden', mode === 'analysis');
+            // Show info note in run section for analysis mode
+            // (n_sweeps must match original simulation for hash to match)
+            document.getElementById('run-info-analysis').style.display = mode === 'analysis' ? 'block' : 'none';
             
             updatePreview();
         }
@@ -2235,17 +2239,13 @@
                 // Analysis mode: wrap in simulation + add analysis section
                 const analysisConfig = buildAnalysisConfig();
                 
-                // Remove run section from algorithm for analysis
+                // Include FULL simulation config (including algorithm.run)
+                // Required because simulation hash includes n_sweeps
                 const simForAnalysis = {
                     system: simConfig.system,
                     model: simConfig.model,
                     state: simConfig.state,
-                    algorithm: {
-                        type: simConfig.algorithm.type,
-                        solver: simConfig.algorithm.solver,
-                        options: simConfig.algorithm.options
-                        // Exclude 'run' - not needed for identifying simulation
-                    }
+                    algorithm: simConfig.algorithm  // Full algorithm including run.n_sweeps
                 };
                 
                 const config = {
