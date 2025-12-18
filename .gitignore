@@ -2,7 +2,7 @@
 data/
 
 #Local test files
-local_tests
+#local_tests
 
 # Julia package artifacts
 Manifest.toml
