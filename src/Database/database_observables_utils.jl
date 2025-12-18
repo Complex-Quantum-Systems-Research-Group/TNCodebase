@@ -37,6 +37,11 @@
 #               ├── metadata.json
 #               └── observable_sweep_*.jld2
 #
+# PATH STRATEGY:
+#   - Index stores only: obs_run_id, sim_run_id, algorithm, timestamp (NO obs_run_dir)
+#   - Path is COMPUTED on query: obs_base_dir/algorithm/sim_run_id/obs_run_id
+#   - This ensures portability (works from any directory)
+#
 # TYPICAL WORKFLOW:
 #   1. Setup: obs_run_id, obs_run_dir = _setup_observable_directory(config, sim_run_id, algorithm)
 #   2. Calculate & Save: _save_observable_sweep(obs_value, obs_run_dir, sweep; extra_data=...)
@@ -214,7 +219,7 @@ function _setup_observable_directory(config::Dict,
     # ═══════════════════════════════════════════════════════════════════════════
     # Update master observable index
     # ═══════════════════════════════════════════════════════════════════════════
-    _update_observable_index(config, sim_run_id, obs_run_id, obs_run_dir, obs_base_dir)
+    _update_observable_index(config, sim_run_id, obs_run_id, algorithm, obs_base_dir)
     
     println("✓ Setup observable directory: $obs_run_dir")
     
@@ -222,18 +227,40 @@ function _setup_observable_directory(config::Dict,
 end
 
 """
-    _update_observable_index(config, sim_run_id, obs_run_id, obs_run_dir, obs_base_dir)
+    _update_observable_index(config, sim_run_id, obs_run_id, algorithm, obs_base_dir)
 
 Update the master observable index with a new calculation entry.
 
 The index maps: sim_run_id → [list of observable calculations]
 
 This enables quick lookup of all observables calculated for a simulation.
+
+# Index Structure (v2 - no obs_run_dir stored)
+```json
+{
+  "by_simulation": {
+    "20241103_142530_a3f5b2c1": [
+      {
+        "obs_run_id": "20241104_153045_f4b2c3d1",
+        "algorithm": "tdvp",
+        "observable_type": "single_site_expectation",
+        "observable_params": {...},
+        "timestamp": "2024-11-04T15:30:45",
+        "obs_config_hash": "f4b2c3d1"
+      }
+    ]
+  }
+}
+```
+
+# Path Computation
+The obs_run_dir is NOT stored. It is computed on query as:
+    obs_run_dir = joinpath(obs_base_dir, algorithm, sim_run_id, obs_run_id)
 """
 function _update_observable_index(config::Dict, 
                                 sim_run_id::String,
                                 obs_run_id::String, 
-                                obs_run_dir::String,
+                                algorithm::String,
                                 obs_base_dir::String)
     index_file = joinpath(obs_base_dir, "observables_index.json")
     
@@ -248,9 +275,10 @@ function _update_observable_index(config::Dict,
     end
     
     # Observable info is under config["analysis"]["observable"]
+    # NOTE: No obs_run_dir stored - computed on query
     entry = Dict(
         "obs_run_id" => obs_run_id,
-        "obs_run_dir" => obs_run_dir,
+        "algorithm" => algorithm,
         "observable_type" => config["analysis"]["observable"]["type"],
         "observable_params" => config["analysis"]["observable"]["params"],
         "timestamp" => string(now()),
@@ -440,6 +468,11 @@ Find all observable calculations for a given simulation run.
 
 # Returns
 - Vector of observable calculation entries (empty if none found)
+- Each entry includes computed `obs_run_dir`
+
+# Path Computation
+The obs_run_dir is computed fresh using the provided obs_base_dir:
+    obs_run_dir = joinpath(obs_base_dir, algorithm, sim_run_id, obs_run_id)
 
 # Example
 ```julia
@@ -462,11 +495,28 @@ function find_observables_for_simulation(sim_run_id::String;
     index = JSON.parsefile(index_file)
     
     # Lookup by sim_run_id
-    if haskey(index["by_simulation"], sim_run_id)
-        return index["by_simulation"][sim_run_id]
-    else
+    if !haskey(index["by_simulation"], sim_run_id)
         return []  # No observables for this simulation
     end
+    
+    # Get raw entries
+    raw_entries = index["by_simulation"][sim_run_id]
+    
+    # Compute obs_run_dir for each entry before returning
+    results = []
+    for entry in raw_entries
+        obs_info = copy(entry)  # Don't modify original
+        # Compute path: obs_base_dir/algorithm/sim_run_id/obs_run_id
+        obs_info["obs_run_dir"] = joinpath(
+            obs_base_dir, 
+            entry["algorithm"], 
+            sim_run_id, 
+            entry["obs_run_id"]
+        )
+        push!(results, obs_info)
+    end
+    
+    return results
 end
 
 """
@@ -491,6 +541,54 @@ function observable_already_calculated(config::Dict,
     return false
 end
 
+"""
+    _get_completed_observable_run(config, sim_run_id; obs_base_dir="observables") -> Union{Dict, Nothing}
+
+Check if a COMPLETED observable calculation exists for the given config.
+
+Returns the observable run info dict if found, nothing otherwise.
+Only returns runs with status="completed" in metadata.
+
+Mirrors `_get_completed_run()` from simulation database.
+"""
+function _get_completed_observable_run(config::Dict, 
+                                       sim_run_id::String; 
+                                       obs_base_dir::String="observables")
+    obs_hash = _compute_observable_config_hash(config)
+    observables = find_observables_for_simulation(sim_run_id, obs_base_dir=obs_base_dir)
+    
+    if isempty(observables)
+        return nothing
+    end
+    
+    # Check each matching observable's metadata for completion status
+    for obs in observables
+        if obs["obs_config_hash"] != obs_hash
+            continue
+        end
+        
+        obs_run_dir = obs["obs_run_dir"]
+        metadata_path = joinpath(obs_run_dir, "metadata.json")
+        
+        # Skip if metadata doesn't exist
+        if !isfile(metadata_path)
+            continue
+        end
+        
+        try
+            metadata = JSON.parsefile(metadata_path)
+            if get(metadata, "status", "") == "completed"
+                return obs  # Found a completed observable run
+            end
+        catch e
+            @warn "Could not read metadata for observable run $(obs["obs_run_id"]): $e"
+            continue
+        end
+    end
+    
+    return nothing  # No completed observable run found
+end
+
 # ============================================================================
 # PART 6: QUERY OBSERVABLES BY CONFIG (Mirrors simulation database pattern)
 # ============================================================================
@@ -505,6 +603,7 @@ Mirrors `find_runs_by_config()` from simulation database.
 
 # Returns
 - Vector of observable run info (empty if none found)
+- Each entry includes computed `obs_run_dir`
 
 # Example
 ```julia
@@ -532,7 +631,7 @@ function find_observable_runs_by_config(config::Dict;
     # Get latest simulation run
     sim_run_id = sim_runs[end]["run_id"]
     
-    # Find all observables for this simulation
+    # Find all observables for this simulation (returns computed paths)
     all_obs = find_observables_for_simulation(sim_run_id, obs_base_dir=obs_base_dir)
     
     # Filter by matching normalized config hash
@@ -551,7 +650,7 @@ Get the most recent observable calculation matching this config.
 Mirrors `get_latest_run_for_config()` from simulation database.
 
 # Returns
-- Dict with observable run info, or nothing if not found
+- Dict with observable run info (including computed obs_run_dir), or nothing if not found
 
 # Example
 ```julia

@@ -34,11 +34,16 @@
 #           ├── metadata.json (includes dt)
 #           └── mps_sweep_*.jld2
 #
+# PATH STRATEGY:
+#   - Index stores only: run_id, timestamp (NO run_dir)
+#   - Path is COMPUTED on query: base_dir/algorithm/run_id
+#   - This ensures portability (works from any directory)
+#
 # TYPICAL WORKFLOW:
 #   1. Setup: run_id, run_dir = _setup_run_directory(config)
 #   2. Run simulation: _save_mps_sweep(state, run_dir, sweep; extra_data=...)
 #   3. Finalize: _finalize_run(run_dir, status="completed")
-#   4. Later: runs = _find_runs_by_config(config)
+#   4. Later: runs = _find_runs_by_config(config, base_dir)
 #   5. Access: mps, data = load_mps_sweep(run_dir, sweep)
 #
 # ============================================================================
@@ -221,17 +226,17 @@ function _setup_run_directory(config::Dict; base_dir::String="data")
     # Create directory (creates parents if needed)
     mkpath(run_dir)
     
-    # ═══════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
     # Save config.json (exact copy for reproducibility)
-    # ═══════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
     config_path = joinpath(run_dir, "config.json")
     open(config_path, "w") do f
         JSON.print(f, config, 2)  # Pretty-print with indentation
     end
     
-    # ═══════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
     # Initialize metadata.json
-    # ═══════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
     metadata = Dict(
         "run_id" => run_id,
         "algorithm" => algorithm,
@@ -252,10 +257,10 @@ function _setup_run_directory(config::Dict; base_dir::String="data")
         JSON.print(f, metadata, 2)
     end
     
-    # ═══════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
     # Update master index
-    # ═══════════════════════════════════════════════════════
-    _update_index(config, run_id, run_dir, base_dir)
+    # ═══════════════════════════════════════════════════════════════════
+    _update_index(config, run_id, base_dir)
     
     # User feedback
     println("✓ Setup complete: $run_dir")
@@ -263,8 +268,9 @@ function _setup_run_directory(config::Dict; base_dir::String="data")
     return run_id, run_dir
 end
 
+
 """
-    _update_index(config::Dict, run_id::String, run_dir::String, base_dir::String)
+    _update_index(config::Dict, run_id::String, base_dir::String)
 
 Update the master index with a new run entry.
 
@@ -273,14 +279,13 @@ The index is a hash table: config_hash → [list of runs]
 This function is called automatically by _setup_run_directory(), so you
 typically don't call it directly.
 
-# Index Structure
+# Index Structure (v2 - no run_dir stored)
 ```json
 {
   "by_config_hash": {
     "a3f5b2c1": [
       {
         "run_id": "20241103_142530_a3f5b2c1",
-        "run_dir": "data/tdvp/20241103_142530_a3f5b2c1",
         "timestamp": "2024-11-03T14:25:30"
       }
     ]
@@ -288,10 +293,16 @@ typically don't call it directly.
 }
 ```
 
+# Path Computation
+The run_dir is NOT stored. It is computed on query as:
+    run_dir = joinpath(base_dir, algorithm, run_id)
+
+This ensures the index works regardless of where you run from.
+
 # What it does
 1. Loads existing index (or creates new if first run)
 2. Computes hash of config
-3. Adds entry to hash table
+3. Adds entry to hash table (run_id + timestamp only)
 4. Removes duplicate if run_id already exists
 5. Saves updated index
 
@@ -300,7 +311,7 @@ typically don't call it directly.
 - Scales: O(1) regardless of total runs
 """
 
-function _update_index(config::Dict, run_id::String, run_dir::String, base_dir::String)
+function _update_index(config::Dict, run_id::String, base_dir::String)
     index_file = joinpath(base_dir, "runs_index.json")
     
     # Load existing index or create new
@@ -319,10 +330,9 @@ function _update_index(config::Dict, run_id::String, run_dir::String, base_dir::
         index["by_config_hash"][config_hash] = []
     end
     
-    # Create entry
+    # Create entry (NO run_dir - it's computed on query)
     entry = Dict(
         "run_id" => run_id,
-        "run_dir" => run_dir,
         "timestamp" => string(now())
     )
     
@@ -483,7 +493,28 @@ function _finalize_run(run_dir::String; status::String="completed")
     println("  ✓ Run finalized with status: $status")
 end
 
+# ============================================================================
+# PART 4: QUERY FUNCTIONS
+# ============================================================================
 
+"""
+    _find_runs_by_config(config::Dict, base_dir::String="data") -> Vector{Dict}
+
+Find all runs matching a configuration.
+
+# Returns
+Vector of run info dicts, each containing:
+- "run_id": Unique run identifier
+- "run_dir": Computed path to run directory (base_dir/algorithm/run_id)
+- "timestamp": When the run was created
+
+# Path Computation
+The run_dir is computed fresh using the provided base_dir:
+    run_dir = joinpath(base_dir, algorithm, run_id)
+
+This ensures the function works regardless of where the original
+simulation was run from.
+"""
 function _find_runs_by_config(config::Dict, base_dir::String="data")
     # Compute hash
     config_hash = _compute_config_hash(config)
@@ -497,11 +528,28 @@ function _find_runs_by_config(config::Dict, base_dir::String="data")
     index = JSON.parsefile(index_file)
     
     # Lookup by hash (O(1))
-    if haskey(index["by_config_hash"], config_hash)
-        return index["by_config_hash"][config_hash]
-    else
+    if !haskey(index["by_config_hash"], config_hash)
         return []  # This config never run
     end
+    
+    # Get raw entries from index
+    raw_entries = index["by_config_hash"][config_hash]
+    
+    # Get algorithm from config to compute paths
+    algorithm = config["algorithm"]["type"]
+    
+    # Compute run_dir for each entry before returning
+    results = []
+    for entry in raw_entries
+        run_info = Dict(
+            "run_id" => entry["run_id"],
+            "timestamp" => entry["timestamp"],
+            "run_dir" => joinpath(base_dir, algorithm, entry["run_id"])  # Computed!
+        )
+        push!(results, run_info)
+    end
+    
+    return results
 end
 
 function _config_already_run(config::Dict, base_dir::String="data")
@@ -560,6 +608,10 @@ function _get_latest_run_for_config(config::Dict; base_dir::String="data")
     
     return sorted_runs[1]
 end
+
+# ============================================================================
+# PART 5: DATA LOADING
+# ============================================================================
 
 function load_mps_sweep(run_dir::String, sweep::Int)
     # Construct filename
@@ -688,4 +740,3 @@ function list_times(run_dir::String)
     
     return times
 end
-
