@@ -1,0 +1,418 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Machine-readable validation spec for the MCP chatbox. Defines type, default, limits, and warnings for every numerical parameter in the config pipeline. Source-verified against Julia code and corrected by domain expert experience.",
+  "last_updated": "2026-03-30",
+
+  "validation_levels": {
+    "error": "Reject input — will crash or produce nonsense",
+    "warning": "Allow but flag — may be inefficient or inaccurate",
+    "info": "Informational hint — user may want to reconsider"
+  },
+
+  "system": {
+
+    "S": {
+      "type": "float",
+      "description": "Spin quantum number per site. Local Hilbert space dimension d = 2S+1.",
+      "default": 0.5,
+      "constraint": "Must satisfy: 2S+1 is a positive integer (i.e., S = 0.5, 1.0, 1.5, 2.0, 2.5, ...)",
+      "common_values": [0.5, 1.0, 1.5, 2.0],
+      "validation": [
+        {"check": "2*S+1 must be a positive integer", "level": "error"},
+        {"check": "S > 2.0", "level": "info", "message": "High spin values are uncommon. Most quantum spin chain studies use S ≤ 2."}
+      ]
+    },
+
+    "N": {
+      "type": "int",
+      "description": "Number of spin sites in the chain.",
+      "minimum": 2,
+      "validation": [
+        {"check": "N < 2", "level": "error", "message": "N must be at least 2."},
+        {"check": "N < 3 and algorithm in [dmrg, tdvp]", "level": "error", "message": "Tensor network algorithms require N ≥ 3 due to MPO structure."},
+        {"check": "N > ed_limit and algorithm in [ed_spectrum, ed_time_evolution]", "level": "error", "message": "System too large for exact diagonalization. Use DMRG or TDVP instead."}
+      ],
+      "ed_limits_by_S": {
+        "0.5": {"hard_max": 14, "recommended_max": 12, "note": "N=14 requires ~4 GB RAM for dense diagonalization. N ≤ 12 recommended."},
+        "1.0": {"hard_max": 10, "recommended_max": 8, "note": "d=3, Hilbert space D=3^N grows fast. N=10 requires ~30 GB RAM."},
+        "1.5": {"hard_max": 8, "recommended_max": 6, "note": "d=4, D=4^N. Very memory intensive."},
+        "2.0": {"hard_max": 7, "recommended_max": 5, "note": "d=5, D=5^N. Extreme memory usage."}
+      },
+      "tn_limits": {
+        "minimum": 3,
+        "no_hard_maximum": true,
+        "practical_range": "N=10 to N=1000"
+      }
+    },
+
+    "N_spins": {
+      "type": "int",
+      "description": "Number of spin sites in spinboson system (boson site is separate). Total sites = N_spins + 1.",
+      "minimum": 1,
+      "validation": [
+        {"check": "N_spins < 1", "level": "error", "message": "Need at least 1 spin site."},
+        {"check": "ED and (nmax+1) * d^N_spins > 16384", "level": "error", "message": "Hilbert space too large for ED. Reduce N_spins or nmax."}
+      ],
+      "ed_guidance": "With nmax=4, S=0.5: N_spins=8 (D=1280, trivial), N_spins=10 (D=5120, ~200 MB), N_spins=12 (D=20480, ~3 GB, near limit)."
+    },
+
+    "nmax": {
+      "type": "int",
+      "description": "Maximum boson occupation number (Fock space cutoff). Boson Hilbert space dimension = nmax+1.",
+      "default": 4,
+      "minimum": 1,
+      "validation": [
+        {"check": "nmax < 1", "level": "error", "message": "nmax must be at least 1. A single Fock state (nmax=0) has no dynamics."},
+        {"check": "nmax > 16", "level": "info", "message": "nmax > 16 is rarely needed. Check that higher Fock states are populated before increasing."}
+      ]
+    },
+
+    "dtype": {
+      "type": "string",
+      "description": "Numerical data type for tensors and operators.",
+      "default": "ComplexF64",
+      "allowed_values": ["ComplexF64", "Float64"],
+      "validation": [
+        {"check": "dtype not in allowed_values", "level": "error", "message": "dtype must be 'ComplexF64' or 'Float64'."},
+        {"check": "dtype == 'Float64' and model uses Y, Sp, or Sm operators", "level": "error", "message": "Float64 is incompatible with complex operators (Y, Sp, Sm). Use ComplexF64."}
+      ],
+      "rules": {
+        "Float64": "Safe only when ALL operators are real: X, Z, I (spin) and a, adag, Bn, Ib (boson).",
+        "ComplexF64": "Always safe. Required when any operator is Y, Sp, or Sm. Use when in doubt."
+      }
+    }
+  },
+
+  "algorithms": {
+
+    "dmrg": {
+      "display_name": "DMRG",
+      "category": "tensor_network",
+      "requires_state": true,
+      "system_requirements": {"N_min": 3},
+
+      "solver": {
+        "type": {"type": "string", "value": "lanczos", "fixed": true, "description": "Always 'lanczos' for DMRG. Not user-configurable."},
+
+        "krylov_dim": {
+          "type": "int",
+          "description": "Krylov subspace dimension for the Lanczos eigensolver. Controls the local eigenvalue solve at each bond.",
+          "default": 4,
+          "minimum": 1,
+          "validation": [
+            {"check": "krylov_dim < 1", "level": "error", "message": "krylov_dim must be at least 1."},
+            {"check": "krylov_dim != 4", "level": "info", "message": "From extensive testing, krylov_dim=4 is optimal for global DMRG convergence. Larger or smaller values can impair convergence."},
+            {"check": "krylov_dim > 40", "level": "warning", "message": "Very large krylov_dim is costly per local solve and rarely improves global convergence."}
+          ]
+        },
+
+        "max_iter": {
+          "type": "int",
+          "description": "Maximum Lanczos restart iterations per local site solve.",
+          "default": 14,
+          "minimum": 1,
+          "recommended_range": [8, 20],
+          "validation": [
+            {"check": "max_iter < 1", "level": "error", "message": "max_iter must be at least 1."},
+            {"check": "max_iter < 8", "level": "warning", "message": "max_iter < 8 may not achieve local convergence. Recommended minimum is 8."},
+            {"check": "max_iter > 20", "level": "warning", "message": "max_iter > 20 is usually unnecessary. The sweet spot for serious convergence is around 14."}
+          ]
+        }
+      },
+
+      "options": {
+        "chi_max": {
+          "type": "int",
+          "description": "Maximum MPS bond dimension. Controls how much entanglement the MPS can represent. DMRG truncates SVD to this dimension after each two-site update.",
+          "default": 64,
+          "minimum": 1,
+          "recommended_range": [16, 512],
+          "validation": [
+            {"check": "chi_max < 1", "level": "error", "message": "chi_max must be at least 1."}
+          ],
+          "notes": {
+            "complexity": "Time complexity scales as O(chi³ · d² · N) per sweep. Memory scales as O(chi² · d · N). Doubling chi_max increases runtime ~8x.",
+            "exact_recovery": "When chi = d^(N/2) (e.g. 2^(N/2) for spin-1/2), the MPS representation is exact and recovers the full Hilbert space.",
+            "entanglement": "Highly entangled systems (e.g. critical systems, systems near quantum phase transitions) require larger chi_max for accurate results. Gapped systems converge with moderate chi_max.",
+            "convergence_workflow": "Start at chi_max=64. Converge by doubling: 64 → 128 → 256. Converged when observables stop changing."
+          }
+        },
+
+        "cutoff": {
+          "type": "float",
+          "description": "SVD truncation cutoff. Singular values below this threshold (after normalization) are discarded. Acts alongside chi_max — whichever is more restrictive wins.",
+          "default": 1e-8,
+          "recommended_range": [1e-10, 1e-6],
+          "validation": [
+            {"check": "cutoff <= 0", "level": "error", "message": "cutoff must be positive."},
+            {"check": "cutoff >= 1", "level": "error", "message": "cutoff must be less than 1 (singular values are normalized)."},
+            {"check": "cutoff < 1e-10", "level": "warning", "message": "Very small cutoff is expensive and rarely needed. 1e-10 is the practical lower limit."},
+            {"check": "cutoff > 1e-6", "level": "warning", "message": "Large cutoff aggressively truncates the MPS. Results may lose accuracy."}
+          ]
+        },
+
+        "local_dim": {
+          "type": "int",
+          "description": "Local Hilbert space dimension per site. AUTO-DERIVED from system S: d = floor(2*S + 1). Never set manually.",
+          "auto_derived": true,
+          "formula": "floor(2 * S + 1)",
+          "user_settable": false
+        }
+      },
+
+      "run": {
+        "n_sweeps": {
+          "type": "int",
+          "description": "Total number of DMRG sweeps. Each sweep is one full left-right-left pass over all bonds.",
+          "default": 20,
+          "minimum": 1,
+          "recommended_range": [10, 100],
+          "validation": [
+            {"check": "n_sweeps < 1", "level": "error", "message": "n_sweeps must be at least 1."},
+            {"check": "n_sweeps > 200", "level": "info", "message": "Most systems converge within 100 sweeps. If energy is still changing after 200 sweeps, consider increasing chi_max instead."}
+          ],
+          "notes": {
+            "convergence": "Monitor |E(n) - E(n-1)| between sweeps. Converged when this drops below ~1e-8. Critical systems or systems with a small spectral gap may need significantly more sweeps and may not converge within the default range. If convergence is slow, increase n_sweeps rather than giving up."
+          }
+        }
+      }
+    },
+
+    "tdvp": {
+      "display_name": "TDVP",
+      "category": "tensor_network",
+      "requires_state": true,
+      "system_requirements": {"N_min": 3},
+
+      "solver": {
+        "type": {"type": "string", "value": "krylov_exponential", "fixed": true, "description": "Always 'krylov_exponential' for TDVP. Not user-configurable."},
+
+        "krylov_dim": {
+          "type": "int",
+          "description": "Krylov subspace dimension for the matrix exponential solver. Controls the number of local Krylov iterations per time step.",
+          "default": 14,
+          "minimum": 1,
+          "recommended_range": [10, 20],
+          "validation": [
+            {"check": "krylov_dim < 1", "level": "error", "message": "krylov_dim must be at least 1."},
+            {"check": "krylov_dim < 10", "level": "warning", "message": "krylov_dim < 10 may not converge the local time step. Recommended minimum is 10."},
+            {"check": "krylov_dim > 20", "level": "warning", "message": "krylov_dim > 20 is costly per time step. The sweet spot is around 14."}
+          ]
+        },
+
+        "tol": {
+          "type": "float",
+          "description": "Convergence tolerance for the Krylov exponential. The solver checks element-wise convergence and stops when all components are within tol.",
+          "default": 1e-8,
+          "recommended_range": [1e-10, 1e-6],
+          "validation": [
+            {"check": "tol <= 0", "level": "error", "message": "tol must be positive."},
+            {"check": "tol < 1e-10", "level": "warning", "message": "tol < 1e-10 is very tight and expensive. May require larger krylov_dim. 1e-10 is the practical lower limit."},
+            {"check": "tol > 1e-6", "level": "warning", "message": "tol > 1e-6 may produce inaccurate local time steps."}
+          ]
+        },
+
+        "evol_type": {
+          "type": "string",
+          "description": "Type of time evolution.",
+          "default": "real",
+          "allowed_values": ["real", "imaginary"],
+          "validation": [
+            {"check": "evol_type not in allowed_values", "level": "error", "message": "evol_type must be 'real' or 'imaginary'. This is enforced by a hard assertion in the code."}
+          ],
+          "value_descriptions": {
+            "real": "Real time evolution: e^{-iHdt}. Unitary, norm-preserving. Use for quantum dynamics, quench problems, time-dependent observables.",
+            "imaginary": "Imaginary time evolution: e^{-Hdt}. Non-unitary, converges toward ground state. Alternative to DMRG for ground state search in hard convergence cases."
+          }
+        }
+      },
+
+      "options": {
+        "dt": {
+          "type": "float",
+          "description": "Time step per sweep. Each sweep advances the state by dt. Total simulated time = dt × n_sweeps.",
+          "default": 0.05,
+          "minimum_strict": 0,
+          "recommended_range": [0.01, 0.1],
+          "validation": [
+            {"check": "dt <= 0", "level": "error", "message": "dt must be positive."},
+            {"check": "dt < 1e-6", "level": "warning", "message": "Extremely small dt means many more sweeps to reach a given total time, which accumulates truncation error."},
+            {"check": "dt > 0.5", "level": "warning", "message": "Large dt increases Trotter-like error per step. Consider reducing dt and increasing n_sweeps."}
+          ],
+          "notes": {
+            "error_tradeoff": "TDVP has two competing error sources. (1) Trotter error: O(dt²) per sweep from the two-site splitting — shrinks with smaller dt. (2) Truncation error: accumulated per sweep from SVD truncation at chi_max — does not depend on dt directly, but more sweeps (needed when dt is small to reach the same total time) means more accumulated truncation error. There is a sweet spot: very small dt reduces Trotter error but increases total truncation error. Very large dt reduces the number of sweeps but increases Trotter error per step. A good starting point is dt=0.05."
+          }
+        },
+
+        "chi_max": {
+          "type": "int",
+          "description": "Maximum MPS bond dimension during time evolution. Entanglement grows under generic dynamics, so chi_max must capture the entanglement at the final time.",
+          "default": 64,
+          "minimum": 1,
+          "recommended_range": [32, 512],
+          "validation": [
+            {"check": "chi_max < 1", "level": "error", "message": "chi_max must be at least 1."}
+          ],
+          "notes": {
+            "complexity": "Time complexity scales as O(chi³ · d² · N) per sweep. Memory scales as O(chi² · d · N). Doubling chi_max increases runtime ~8x.",
+            "exact_recovery": "When chi = d^(N/2) (e.g. 2^(N/2) for spin-1/2), the MPS is exact and recovers the full Hilbert space.",
+            "entanglement_growth": "Under generic (non-integrable) dynamics, entanglement grows linearly in time. chi_max must be large enough for the final simulation time. For long-time simulations, chi_max=256 or higher may be needed."
+          }
+        },
+
+        "cutoff": {
+          "type": "float",
+          "description": "SVD truncation cutoff for MPS compression after each time step. Works alongside chi_max.",
+          "default": 1e-8,
+          "recommended_range": [1e-10, 1e-6],
+          "validation": [
+            {"check": "cutoff <= 0", "level": "error", "message": "cutoff must be positive."},
+            {"check": "cutoff >= 1", "level": "error", "message": "cutoff must be less than 1."},
+            {"check": "cutoff < 1e-10", "level": "warning", "message": "Very small cutoff is expensive and rarely needed."},
+            {"check": "cutoff > 1e-6", "level": "warning", "message": "Large cutoff aggressively truncates. Results may lose accuracy."}
+          ]
+        },
+
+        "local_dim": {
+          "type": "int",
+          "auto_derived": true,
+          "formula": "floor(2 * S + 1)",
+          "user_settable": false
+        }
+      },
+
+      "run": {
+        "n_sweeps": {
+          "type": "int",
+          "description": "Total number of time steps (sweeps). Total simulated time = dt × n_sweeps. This is the user's choice based on the desired total simulation time.",
+          "default": 100,
+          "minimum": 1,
+          "derived_quantity": "total_time = dt × n_sweeps",
+          "validation": [
+            {"check": "n_sweeps < 1", "level": "error", "message": "n_sweeps must be at least 1."}
+          ]
+        }
+      }
+    },
+
+    "ed_spectrum": {
+      "display_name": "ED Spectrum",
+      "category": "exact_diagonalization",
+      "requires_state": false,
+      "system_requirements": "N must be within ED limits (see system.N.ed_limits_by_S)",
+
+      "params": {
+        "n_states": {
+          "type": "int_or_null",
+          "description": "Number of lowest eigenstates to compute. If null or omitted, computes the full spectrum (all D eigenstates).",
+          "default": null,
+          "minimum": 1,
+          "maximum": "D (Hilbert space dimension)",
+          "validation": [
+            {"check": "n_states is set and n_states < 1", "level": "error", "message": "n_states must be at least 1."},
+            {"check": "n_states is set and n_states > D", "level": "error", "message": "n_states cannot exceed Hilbert space dimension D. Code will crash with assertion error."}
+          ]
+        },
+
+        "use_sparse": {
+          "type": "bool",
+          "description": "Whether to use sparse (Lanczos-based) diagonalization instead of dense LAPACK.",
+          "default": false,
+          "validation": [
+            {"check": "use_sparse == true and n_states is null", "level": "warning", "message": "use_sparse=true without n_states will be ignored — full spectrum always uses dense diagonalization. You will lose access to the full spectrum. Set n_states if you only need a few lowest states."}
+          ],
+          "notes": {
+            "dense": "Dense diagonalization (use_sparse=false): Computes all D eigenstates via LAPACK. Reliable. Required for full spectrum.",
+            "sparse": "Sparse diagonalization (use_sparse=true): Uses Arpack Lanczos for only the lowest n_states. Faster for large D with small n_states. Only used when n_states is set AND n_states < D/2 AND D > 20."
+          }
+        }
+      }
+    },
+
+    "ed_time_evolution": {
+      "display_name": "ED Dynamics",
+      "category": "exact_diagonalization",
+      "requires_state": true,
+      "system_requirements": "N must be within ED limits (see system.N.ed_limits_by_S)",
+
+      "params": {
+        "dt": {
+          "type": "float",
+          "description": "Time step between saved snapshots. The state is evolved exactly using eigendecomposition — dt controls only output resolution, NOT accuracy.",
+          "default": 0.1,
+          "minimum_strict": 0,
+          "recommended_range": [0.01, 0.5],
+          "validation": [
+            {"check": "dt <= 0", "level": "error", "message": "dt must be positive."}
+          ],
+          "notes": {
+            "accuracy": "Unlike TDVP, ED time evolution is numerically exact (machine precision). dt has zero effect on accuracy — it only determines how often snapshots are saved. Choose dt based on desired time resolution of observables."
+          }
+        },
+
+        "n_steps": {
+          "type": "int",
+          "description": "Number of time steps to simulate. Total simulated time = dt × n_steps. User's choice based on desired total simulation time.",
+          "default": 100,
+          "minimum": 1,
+          "derived_quantity": "total_time = dt × n_steps",
+          "validation": [
+            {"check": "n_steps < 1", "level": "error", "message": "n_steps must be at least 1."}
+          ]
+        }
+      }
+    }
+  },
+
+  "cross_parameter_constraints": [
+    {
+      "id": "tn_minimum_N",
+      "description": "Tensor network algorithms require N ≥ 3",
+      "condition": "algorithm in ['dmrg', 'tdvp'] and N < 3",
+      "level": "error",
+      "message": "DMRG and TDVP require at least 3 sites due to MPO structure."
+    },
+    {
+      "id": "ed_system_size",
+      "description": "ED algorithms have hard system size limits",
+      "condition": "algorithm in ['ed_spectrum', 'ed_time_evolution'] and N > ed_limits_by_S[S].hard_max",
+      "level": "error",
+      "message": "System too large for exact diagonalization. Hilbert space dimension D = d^N exceeds practical memory limits. Consider DMRG (ground state) or TDVP (time evolution) instead."
+    },
+    {
+      "id": "dtype_complex_operators",
+      "description": "Float64 incompatible with complex operators",
+      "condition": "dtype == 'Float64' and any operator in model is Y, Sp, or Sm",
+      "level": "error",
+      "message": "The model uses complex operators (Y, S+, or S-). dtype must be ComplexF64."
+    },
+    {
+      "id": "sparse_without_nstates",
+      "description": "Sparse diagonalization without n_states is pointless",
+      "condition": "algorithm == 'ed_spectrum' and use_sparse == true and n_states is null",
+      "level": "warning",
+      "message": "use_sparse=true is ignored for full spectrum — dense diagonalization is always used. Set n_states to use sparse solver, but note you will lose the full spectrum."
+    },
+    {
+      "id": "local_dim_auto",
+      "description": "local_dim is auto-derived, never user-set",
+      "condition": "user explicitly sets local_dim",
+      "level": "warning",
+      "message": "local_dim is automatically computed from S (d = 2S+1). Your value will be overwritten."
+    },
+    {
+      "id": "ed_time_requires_state",
+      "description": "ED time evolution requires an initial state",
+      "condition": "algorithm == 'ed_time_evolution' and state is not provided",
+      "level": "error",
+      "message": "ED time evolution requires an initial state to evolve. Provide a state configuration."
+    },
+    {
+      "id": "tn_requires_state",
+      "description": "TN algorithms require an initial state",
+      "condition": "algorithm in ['dmrg', 'tdvp'] and state is not provided",
+      "level": "error",
+      "message": "DMRG and TDVP require an initial MPS state. Provide a state configuration."
+    }
+  ]
+}
