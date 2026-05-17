@@ -237,6 +237,7 @@ async def _stream_chat_response(req: ChatRequest) -> AsyncGenerator[str, None]:
         # this same round so every tool_use block gets a paired tool_result before
         # any subsequent message is appended.
         exec_tools = [t for t in completed_tool_uses if t["name"] in EXECUTABLE_TOOLS]
+        round_tool_results: list[dict] = []
 
         for exec_tool in exec_tools:
             tool_name = exec_tool["name"]
@@ -283,10 +284,7 @@ async def _stream_chat_response(req: ChatRequest) -> AsyncGenerator[str, None]:
                         }
                     _log_tool_event("TOOL_RESULT", tool_name, result_summary=result_text[:80])
 
-            history.append({
-                "role": "user",
-                "content": [{"toolResult": {"toolUseId": exec_tool["toolUseId"], "content": [{"text": result_text}]}}],
-            })
+            round_tool_results.append({"toolResult": {"toolUseId": exec_tool["toolUseId"], "content": [{"text": result_text}]}})
 
         # Process non-executable tools from this same round immediately so that
         # no tool_use block is left without a tool_result before the next append.
@@ -358,10 +356,10 @@ async def _stream_chat_response(req: ChatRequest) -> AsyncGenerator[str, None]:
             else:
                 result_text = f"Tool {tool_name} acknowledged."
 
-            history.append({
-                "role": "user",
-                "content": [{"toolResult": {"toolUseId": tool["toolUseId"], "content": [{"text": result_text}]}}],
-            })
+            round_tool_results.append({"toolResult": {"toolUseId": tool["toolUseId"], "content": [{"text": result_text}]}})
+
+        if round_tool_results:
+            history.append({"role": "user", "content": round_tool_results})
 
         if not exec_tools:
             break  # No more executable tools; all non-exec tools handled above
@@ -400,6 +398,7 @@ async def chat(req: ChatRequest):
     try:
         response = await asyncio.to_thread(_call_bedrock)
     except Exception as e:
+        history.pop()
         raise HTTPException(status_code=502, detail=f"Bedrock error: {e}")
 
     EXECUTABLE_TOOLS = {
@@ -422,6 +421,7 @@ async def chat(req: ChatRequest):
 
         history.append({"role": "assistant", "content": content})
 
+        round_tool_results: list[dict] = []
         for exec_tool in exec_tools_in_round:
             tool_name = exec_tool["name"]
             tool_args = exec_tool["input"]
@@ -483,13 +483,10 @@ async def chat(req: ChatRequest):
                         }
                     _log_tool_event("TOOL_RESULT", tool_name, result_summary=result_text[:80])
 
-            history.append({
-                "role": "user",
-                "content": [{"toolResult": {
-                    "toolUseId": exec_tool["toolUseId"],
-                    "content": [{"text": result_text}],
-                }}],
-            })
+            round_tool_results.append({"toolResult": {
+                "toolUseId": exec_tool["toolUseId"],
+                "content": [{"text": result_text}],
+            }})
 
         # Append tool_results for any non-executable tools in this intermediate round
         # to prevent orphaned tool_use blocks when mixed with executable tools.
@@ -507,13 +504,13 @@ async def chat(req: ChatRequest):
                 result_text = "Config queued for review."
             else:
                 result_text = f"Tool {tool_name} acknowledged."
-            history.append({
-                "role": "user",
-                "content": [{"toolResult": {
-                    "toolUseId": tool["toolUseId"],
-                    "content": [{"text": result_text}],
-                }}],
-            })
+            round_tool_results.append({"toolResult": {
+                "toolUseId": tool["toolUseId"],
+                "content": [{"text": result_text}],
+            }})
+
+        if round_tool_results:
+            history.append({"role": "user", "content": round_tool_results})
 
         try:
             response = await asyncio.to_thread(_call_bedrock)
